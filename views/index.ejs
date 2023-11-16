@@ -1,0 +1,258 @@
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"
+        integrity="sha512-zoJXRvW2gC8Z0Xo3lBbao5+AS3g6YWr5ztKqaicua11xHo+AvE1b0lT9ODgrHTmNUxeCw0Ry4BGRYZfXu70weg=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+    <style>
+        canvas {
+            /* position: relative; */
+            left: calc(50% - 390px);
+            top: 50px;
+            border: 1px dotted black;
+            cursor: crosshair;
+            background: #ecf0f1;
+        }
+    </style>
+</head>
+
+<body>
+    <div>
+        <input type="text" name="room" id="roomid" value="1" />
+        <button id="joinBtn">join room</button>
+    </div>
+    <div id="container">
+        <div>
+            <canvas id="c1" style="border : 2px solid"></canvas>
+        </div>
+        <div id="videos">
+        </div>
+    </div>
+
+
+</body>
+<!-- <script src="/static/socket.io/client-dist/socket.io.js"></script> -->
+<script>
+
+    function makeCanvas() {
+        let canvas = document.getElementsByTagName("canvas")[0];
+        context = canvas.getContext('2d');
+        canvas.width = 320;
+        canvas.height = 240;
+
+        context.fillStyle = "white";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+
+        context.strokeStyle = "#913d88";
+        context.lineWidth = 2;
+
+        canvas.onmousedown = startDrawing;
+        canvas.onmouseup = stopDrawing;
+        canvas.onmousemove = draw;
+        let isDrawing = false;
+        function startDrawing(e) {
+            isDrawing = true;
+            context.beginPath();
+            context.moveTo(e.pageX - canvas.offsetLeft, e.pageY - canvas.offsetTop);
+        }
+
+        function draw(e) {
+            if (isDrawing == true) {
+                var x = e.pageX - canvas.offsetLeft;
+                var y = e.pageY - canvas.offsetTop;
+
+                context.lineTo(x, y);
+                context.stroke();
+            }
+        }
+
+        function stopDrawing() {
+            isDrawing = false;
+        }
+
+        return canvas;
+    }
+    function newUser() {
+        let canvas = makeCanvas();
+        let videoContainer = document.getElementById("videos");
+        let streamSrc = canvas.captureStream(60);
+        return {
+            canvas,
+            streamSrc,
+            addVideo() {
+                const video = document.createElement("video");
+                video.setAttribute("playsinline", "");
+                video.setAttribute("autoplay", "");
+                video.setAttribute("muted", "");
+                video.style = "border:2px solid; margin : 2px;";
+                videoContainer.appendChild(video);
+                return video;
+            },
+        }
+    }
+
+    document.getElementById("joinBtn").onclick = () => {
+        startJoin(document.getElementById('roomid').value);
+        document.getElementById("joinBtn").hidden = true;
+        document.getElementById('roomid').readOnly = true;
+    }
+</script>
+<script>
+    var registeredUsers = {};
+    var configuration = {
+        'iceServers': [{
+            'urls': 'stun:stun.l.google.com:19302'
+        }]
+    }
+    var user = newUser();
+    var socket = io();
+    setSocket();
+
+    
+    async function joinRoom(user) {
+        socket.emit("join", user);
+        return await  waitSocketResponse("join");        
+    }
+    async function startJoin(room) {
+        user.room = room;
+        let res = await joinRoom(user);
+        user.uid = res.uid;
+        requestToExisitingUser(res.users);
+    }
+
+    async function requestToExisitingUser(users) {
+        users.forEach(async responseUser => {
+            const requestConnection = new RTCPeerConnection(configuration);
+            registeredUsers[responseUser.uid] = { 
+                remoteUser: responseUser,
+                connection: requestConnection 
+            };
+            requestConnection.addStream(user.streamSrc);
+            requestConnection.onicecandidate = async (e) => {
+                if (e.candidate) {
+                    socket.emit("candidate", {
+                        from: user,
+                        to: responseUser,
+                        candidate: e.candidate
+                    });
+                }
+            };
+            requestConnection.ontrack = function (ev) {
+                if (!registeredUsers[responseUser.uid].video) {
+                    resolveSocketResponse("track-"+responseUser.uid)(ev);
+                }
+            }
+            requestConnection.onconnectionstatechange = ()=>{                
+                switch (requestConnection.connectionState) {
+                    case "disconnected":
+                        registeredUsers[responseUser.uid].video.remove();
+                        delete registeredUsers[responseUser.uid];      
+                    default:
+                        console.info(responseUser.uid,requestConnection.connectionState)
+                        break;
+                }
+            }
+
+            const offer = await requestConnection.createOffer();
+            requestConnection.setLocalDescription(offer);
+            socket.emit("offer", {
+                from: user,
+                to: responseUser,
+                offer
+            })           
+
+            const answerRes = await waitSocketResponse("answer-"+responseUser.uid);
+            requestConnection.setRemoteDescription(answerRes.answer);
+            
+            let ev = await waitSocketResponse("track-"+responseUser.uid);
+            registeredUsers[responseUser.uid].video = user.addVideo();
+            registeredUsers[responseUser.uid].src = ev.streams[0];
+            registeredUsers[responseUser.uid].video.srcObject = ev.streams[0];
+            console.info(registeredUsers);
+
+        });
+    }
+    async function responseRtc(res) {
+        const responseConnection = new RTCPeerConnection(configuration);
+        const requestUser = res.from;
+        registeredUsers[res.from.uid] = {
+            remoteUser: res.from,
+            connection: responseConnection
+        };
+        responseConnection.addStream(user.streamSrc);
+        responseConnection.setRemoteDescription(res.offer);
+
+        responseConnection.onicecandidate = async (e) => {
+            if (e.candidate) {
+                socket.emit("candidate", {
+                    from: user,
+                    to: res.from,
+                    candidate: e.candidate
+                });
+            }
+        };
+        responseConnection.ontrack = function (ev) {
+            if (!registeredUsers[requestUser.uid].video) {
+                let video = user.addVideo();
+                registeredUsers[requestUser.uid].video = video;
+                registeredUsers[requestUser.uid].src = ev.streams[0];
+                video.srcObject = ev.streams[0];
+            }
+        }        
+        responseConnection.onconnectionstatechange = ()=>{
+            switch (responseConnection.connectionState) {
+                case "disconnected":
+                    registeredUsers[requestUser.uid].video.remove();
+                    delete registeredUsers[requestUser.uid];        
+                default:
+                    console.info(requestUser.uid,responseConnection.connectionState)
+                    break;
+            }
+        }
+
+        const answer = await responseConnection.createAnswer();
+        responseConnection.setLocalDescription(answer);
+        socket.emit("answer", {
+            from: user,
+            to: res.from,
+            answer
+        });
+        console.info(registeredUsers);
+    }
+
+    function setSocket() {
+        socket.on("joinResponse", (res) => {
+            resolveSocketResponse("join")(res);
+        });
+        socket.on("answer", (res) => {
+            resolveSocketResponse("answer-"+res.from.uid)(res);
+        });
+        socket.on("offer", (res) => {
+            responseRtc(res);
+        });
+        socket.on("candidate", (res) => {
+            registeredUsers[res.from.uid].connection.addIceCandidate(res.candidate);
+        });
+    }
+
+    var _response = {};
+    function waitSocketResponse(name) {
+        let res;
+        let pr = new Promise(function (resolve, reject) {
+            res = resolve;
+        });
+        _response[name] = res;
+        return pr;
+    }
+    function resolveSocketResponse(name){
+        return _response[name];
+    }
+
+</script>
+
+</html>

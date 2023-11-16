@@ -1,0 +1,168 @@
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"
+        integrity="sha512-CeIsOAsgJnmevfCi2C7Zsyy6bQKi43utIjdA87Q0ZY84oDqnI0uwfM9+bKiIkI75lUeI00WG/+uJzOmuHlesMA=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <style>
+        canvas {
+            /* position: relative; */
+            left: calc(50% - 390px);
+            top: 50px;
+            border: 1px dotted black;
+            cursor: crosshair;
+            background: #ecf0f1;
+        }
+    </style>
+</head>
+
+<body>
+    <div>
+        <button onclick="newJoin();">newUser</button>
+    </div>
+    <div id="container">
+    </div>
+
+</body>
+<!-- <script src="/static/socket.io/client-dist/socket.io.js"></script> -->
+<script>
+
+    function generateUID() {
+        var firstPart = (Math.random() * 46656) | 0;
+        var secondPart = (Math.random() * 46656) | 0;
+        firstPart = ("000" + firstPart.toString(36)).slice(-3);
+        secondPart = ("000" + secondPart.toString(36)).slice(-3);
+        return firstPart + secondPart;
+    }
+    function makeCanvas(base) {
+        let canvas = document.createElement("canvas");
+        canvas.style = "border: 2px solid; margin : 2px;";
+
+        base.appendChild(canvas);
+        const context = canvas.getContext('2d');
+        canvas.width = 320;
+        canvas.height = 240;
+
+        context.fillStyle = "white";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        context.strokeStyle = "#913d88";
+        context.lineWidth = 2;
+
+        canvas.onmousedown = startDrawing;
+        canvas.onmouseup = stopDrawing;
+        canvas.onmousemove = draw;
+        let isDrawing = false;
+        function startDrawing(e) {
+            isDrawing = true;
+            context.beginPath();
+            context.moveTo(e.pageX - canvas.offsetLeft, e.pageY - canvas.offsetTop);
+        }
+
+        function draw(e) {
+            if (isDrawing == true) {
+                var x = e.pageX - canvas.offsetLeft;
+                var y = e.pageY - canvas.offsetTop;
+
+                context.lineTo(x, y);
+                context.stroke();
+            }
+        }
+
+        function stopDrawing() {
+            isDrawing = false;
+        }
+
+        return canvas;
+    }
+    function newUser() {
+        const uid = generateUID();
+        const container = document.getElementById("container");
+
+        let base = document.createElement("div");
+        base.id = uid;
+        container.appendChild(base);
+        let canvas = makeCanvas(base);
+        let videos = [];
+        let peers = {};
+        let streamSrc = canvas.captureStream();
+        return {
+            uid,
+            base,
+            canvas,
+            videos,
+            peers,
+            streamSrc,
+            addVideo() {
+                const v = document.getElementById("vBase");
+                const video = document.createElement("video");
+                video.setAttribute("playsinline", "");
+                video.setAttribute("autoplay", "");
+                video.setAttribute("muted", "");
+                video.style = "border:2px solid; margin : 2px;";
+                base.appendChild(video);
+                videos.push({ video });
+                return video;
+            }
+        }
+    }
+</script>
+<script>
+    var users = [];
+    var configuration = {
+        'iceServers': [{
+            'urls': 'stun:stun.l.google.com:19302'
+        }]
+    }
+    async function requestToExisitingUser(requestUser) {
+        users.forEach(async responseUser => {
+            const requestConnection = new RTCPeerConnection(configuration);
+            const responseConnection = new RTCPeerConnection(configuration);
+            requestConnection.addStream(requestUser.streamSrc);
+            responseConnection.addStream(responseUser.streamSrc);
+
+            requestConnection.onicecandidate = async (e) => {
+                if (e.candidate) {
+                    responseConnection.addIceCandidate(new RTCIceCandidate(e.candidate));
+                }
+            };
+            responseConnection.onicecandidate = async (e) => {
+                // console.info("candi");
+                if (e.candidate) {
+                    requestConnection.addIceCandidate(new RTCIceCandidate(e.candidate));
+                }
+            };
+            requestConnection.ontrack = function (ev) {
+                if (!requestUser.peers[responseUser.uid]) {
+                    let video = requestUser.addVideo();
+                    video.srcObject = ev.streams[0];
+                    requestUser.peers[responseUser.uid] = video;
+                }
+            }
+            responseConnection.ontrack = function (ev) {
+                if (!responseUser.peers[requestUser.uid]) {
+                    let video = responseUser.addVideo();
+                    video.srcObject = ev.streams[0];
+                    responseUser.peers[requestUser.uid] = video;
+                }
+            }
+            const offer = await requestConnection.createOffer();
+            requestConnection.setLocalDescription(offer);
+            responseConnection.setRemoteDescription(offer);
+            const answer = await responseConnection.createAnswer();
+            responseConnection.setLocalDescription(answer);
+            requestConnection.setRemoteDescription(answer);            
+        });
+    }
+    async function newJoin() {
+        let requestUser = newUser();
+        requestToExisitingUser(requestUser);
+        users.push(requestUser);
+    }
+
+</script>
+
+</html>
